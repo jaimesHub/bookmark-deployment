@@ -1,0 +1,116 @@
+services:
+  # ===== Redis (persistence layer) =====
+  redis:
+    image: redis:7-alpine
+    container_name: bookmark-redis
+    restart: unless-stopped
+    expose:
+      - "6379"
+    volumes:
+      - redis-data:/data
+    command: ["redis-server", "--appendonly", "yes"] # Bật AOF persistence
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.3"
+          memory: 96M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ===== API (app server) =====
+  api:
+    image: ${DOCKER_USER}/bookmark-app:${APP_VERSION:-latest}
+    container_name: bookmark-api
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      # Redis: app dùng envconfig prefix "" (rỗng), tag REDIS_ADDR (host:port format, không phải URL)
+      REDIS_ADDR: redis:6379
+      # Service config: envconfig prefix "" (rỗng)
+      SERVICE_NAME: ${SERVICE_NAME:-bookmark-app}
+      APP_HOSTNAME: ${APP_HOSTNAME}
+      # API config: envconfig prefix "api" → env vars phải có prefix API_
+      API_CONTAINER_PORT: 8080
+      API_LOG_LEVEL: ${LOG_LEVEL:-info}
+      API_APP_ENV: ${APP_ENV:-prod}
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - internal
+    healthcheck:
+      # NOTE: KHÔNG dùng `--spider` (sẽ gửi HEAD → Gin trả 404 vì chỉ đăng ký GET).
+      # `-O /dev/null` để discard response body nhưng vẫn là GET request.
+      test:
+        ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/health-check"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s # Go cold-start ~5s, buffer thêm
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 192M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ===== Nginx (reverse proxy, edge layer) =====
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: bookmark-nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_HOST_PORT:-80}:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - internal
+    healthcheck:
+      # Nginx proxy về api → cùng lý do KHÔNG dùng --spider (HEAD → 404).
+      # Dùng 127.0.0.1 thay vì localhost: BusyBox wget trong nginx:alpine có thể
+      # resolve localhost → ::1 (IPv6) trước, nhưng nginx default `listen 80` chỉ bind IPv4.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/health-check"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.2"
+          memory: 48M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ===== Network =====
+networks:
+  internal:
+    driver: bridge
+    name: bookmark-internal
+
+# ===== Volumes =====
+volumes:
+  redis-data:
+    name: bookmark-redis-data
