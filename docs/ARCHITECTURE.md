@@ -7,11 +7,12 @@
 
 ## 1. Overview
 
-**Bookmark App** là URL shortener đơn giản: POST URL dài → nhận short code → GET short code → 302 redirect về URL gốc.
+**Bookmark App** là URL shortener với UI: nhập URL dài qua web UI → nhận short code → 302 redirect khi access short URL.
 
-**Deployment topology**: 3 service chạy trên 1 VM qua `docker-compose`:
+**Deployment topology**: 4 service chạy trên 1 VM qua `docker-compose`:
 
-- `nginx` — reverse proxy edge, là service **duy nhất** expose ra internet (port 80)
+- `nginx` — reverse proxy edge, là service **duy nhất** expose ra internet (port 80). Route theo path prefix.
+- `portal` — SolidStart SSR frontend (instructor-provided image `ebvn/bookmark-app-portal:mono`)
 - `api` — Go application server (image pull từ Docker Hub, pin SHA)
 - `redis` — persistence layer (named volume cho data, AOF enabled)
 
@@ -26,45 +27,53 @@
 ## 2. System Diagram
 
 ```
-                       Internet
-                          │
-                          ▼ (port 80, public)
-                   ┌─────────────┐
-                   │    nginx    │  bookmark-nginx
-                   │  :80 (host) │  reverse proxy
-                   │ :80 (cont.) │  proxy_pass → api
-                   └──────┬──────┘
-                          │
-            docker network "bookmark-internal" (bridge)
-                          │
-              ┌───────────┴───────────┐
-              ▼                       ▼
-       ┌────────────┐          ┌────────────┐
-       │    api     │ ────────▶│   redis    │
-       │   :8080    │  STORE   │   :6379    │
-       │  (expose,  │ ◀────────│  (expose,  │
-       │  no ports) │   READ   │  no ports) │
-       └────────────┘          └─────┬──────┘
-       bookmark-api            bookmark-redis
-       Image:                        │
-       jaimes96/bookmark-app         ▼
-       :<sha>                  ┌──────────────┐
-                               │ named volume │
-                               │ redis-data   │
-                               │ (AOF persist)│
-                               └──────────────┘
+                              Internet
+                                 │
+                                 ▼ (port 80, public)
+                        ┌────────────────┐
+                        │     nginx      │  bookmark-nginx
+                        │  :80 (host)    │  reverse proxy
+                        │  :80 (cont.)   │  routing theo path prefix
+                        └────────┬───────┘
+                                 │
+                docker network "bookmark-internal" (bridge)
+                                 │
+         ┌───────────────┬───────┴──────────┬───────────────┐
+         │               │                  │               │
+         ▼               ▼                  ▼               ▼
+   ┌──────────┐   ┌──────────┐        ┌──────────┐   ┌──────────┐
+   │  portal  │   │   api    │ ──────▶│  redis   │   │  (api    │
+   │  :3000   │   │  :8080   │ STORE  │  :6379   │   │  serves  │
+   │ (expose) │   │ (expose) │ ◀──────│ (expose) │   │  /v1/*)  │
+   └──────────┘   └──────────┘  READ  └─────┬────┘   └──────────┘
+   bookmark-      bookmark-api              │
+   portal         Image:                    ▼
+   Image:         jaimes96/                 ┌──────────────┐
+   ebvn/          bookmark-app:<sha>        │ named volume │
+   bookmark-app-                            │ redis-data   │
+   portal:mono                              │ (AOF persist)│
+   (SolidStart                              └──────────────┘
+    SSR)
+
+   ▣ nginx routing (path-based):
+       /                              → portal (FE catch-all)
+       /assets/*                      → portal (FE static)
+       /bookmark_service/v1/*         → strip prefix → api/v1/*
+       /v1/links/redirect/*           → api (passthrough, short URL access)
+       /health-check                  → api (ops/healthcheck)
 
    ▣ Port public ra Internet:   chỉ port 80 (nginx)
    ▣ Cloud firewall + UFW:     allow 22 (SSH) + 80 (HTTP)
-   ▣ API + Redis:              chỉ reachable trong network nội bộ
-                               → "expose:" KHÔNG "ports:" trong docker-compose
+   ▣ portal/api/redis:          chỉ reachable trong network nội bộ
+                                → "expose:" KHÔNG "ports:" trong docker-compose
 ```
 
 ### Service responsibility
 
 | Service | Role | Host port | Container port | Image |
 |---|---|---|---|---|
-| **nginx** | Reverse proxy (future: TLS termination) | 80 | 80 | `nginx:1.27-alpine` |
+| **nginx** | Reverse proxy + path routing (future: TLS termination) | 80 | 80 | `nginx:1.27-alpine` |
+| **portal** | Frontend SSR (SolidStart) — UI shorten + login | (none) | 3000 | `ebvn/bookmark-app-portal:${PORTAL_VERSION}` |
 | **api** | Business logic, HTTP handlers | (none) | 8080 | `${DOCKER_USER}/bookmark-app:${APP_VERSION}` |
 | **redis** | Key-value store (short_code → long_url) | (none) | 6379 | `redis:7-alpine` |
 
@@ -80,13 +89,14 @@ Stack chạy được trên VM 1GB RAM:
 
 | Service | CPU limit | Memory limit | Memory actual (load nhẹ) |
 |---|---|---|---|
-| api | 0.5 | 192M | ~20 MiB |
+| api | 0.5 | 192M | ~20–60 MiB |
+| portal | 0.3 | 128M | ~68 MiB |
 | redis | 0.3 | 96M | ~10 MiB |
-| nginx | 0.2 | 48M | ~8 MiB |
-| **Total container** | 1.0 | 336M | ~38 MiB |
+| nginx | 0.2 | 48M | ~9 MiB |
+| **Total container** | 1.3 | **464M** | ~146 MiB |
 | Docker daemon | — | ~95M peak | — |
 
-Đã giảm 25% so với baseline (256/128/64 MiB) sau pre-flight: VM available 503Mi → buffer ~140 MiB.
+Đã giảm 25% backend baseline (256/128/64 MiB) sau pre-flight. Portal thêm 128M với headroom 2x so với idle 68MiB. VM available 503Mi → buffer ~40 MiB sau khi up đủ stack (tight nhưng feasible).
 
 ---
 
@@ -140,13 +150,17 @@ make ps
 make health
 # Expect: {"message":"OK","service_name":"bookmark-app","hostname":"bookmark-local-dev",...}
 
-# Test E2E — shorten URL
-curl -s -X POST http://localhost/v1/links/shorten \
+# Test FE qua browser
+open http://localhost/
+# Expect: SolidStart UI hiện form "Enter your url here" + nút Generate
+
+# Test E2E — shorten URL theo FE path (nginx rewrite prefix)
+curl -s -X POST http://localhost/bookmark_service/v1/links/shorten \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com","exp":3600}'
 # Expect: {"code":"XXXXXXX","message":"Shorten URL generated successfully!"}
 
-# Test redirect
+# Test redirect (direct API path, không qua FE prefix)
 curl -i http://localhost/v1/links/redirect/<CODE>
 # Expect: HTTP 302, Location: https://example.com
 
@@ -218,7 +232,8 @@ docker compose pull && docker compose up -d
 | Variable | Required | Default | Mô tả |
 |---|---|---|---|
 | `DOCKER_USER` | ✅ Yes | — | Docker Hub username — nơi pull image API. VD: `jaimes96` |
-| `APP_VERSION` | ⚠️ Recommended | `latest` | Tag image. **Production phải pin SHA cụ thể** (vd: `114e407`), KHÔNG dùng `latest` |
+| `APP_VERSION` | ⚠️ Recommended | `latest` | Tag image API. **Production phải pin SHA cụ thể** (vd: `114e407`), KHÔNG dùng `latest` |
+| `PORTAL_VERSION` | ❌ Optional | `mono` | Tag image FE (`ebvn/bookmark-app-portal`). Instructor-provided image, mặc định `mono` |
 | `APP_HOSTNAME` | ✅ Yes | — | Tên định danh instance, xuất hiện trong response `/health-check`. Local: `bookmark-local-dev`. Prod: `bookmark-prod-vm1` |
 | `SERVICE_NAME` | ❌ Optional | `bookmark-app` | Tên service trong log Zerolog |
 | `LOG_LEVEL` | ❌ Optional | `info` | `debug`, `info`, `warn`, `error`. Map vào `API_LOG_LEVEL` của app |
@@ -390,6 +405,50 @@ sudo lsof -i :80
 **Fix** (2 options):
 1. Stop service đang chiếm: `sudo systemctl stop apache2` (hoặc nginx system)
 2. Đổi `NGINX_HOST_PORT=8080` trong `.env` → truy cập qua `http://<ip>:8080/`
+
+---
+
+### 🟡 6.9 — FE load OK nhưng nút Generate không trả response (CORS / 404 / 502)
+
+**Triệu chứng**: Browser mở `http://<host>/` thấy UI SolidStart, nhập URL + click Generate → không có short code, browser console có error.
+
+**Debug** (browser DevTools Network tab):
+- Request URL có dạng `http://<host>/bookmark_service/v1/links/shorten` không?
+- Status code? 200/404/502/CORS?
+
+**Nguyên nhân thường gặp**:
+- **404**: nginx `default.conf` thiếu `location /bookmark_service/` block hoặc rewrite sai. Verify:
+  ```bash
+  docker exec bookmark-nginx cat /etc/nginx/conf.d/default.conf | grep -A3 bookmark_service
+  ```
+- **502 Bad Gateway**: api chưa healthy hoặc nginx rewrite path sai. Test rewrite:
+  ```bash
+  docker exec bookmark-nginx wget -O - http://api:8080/v1/links/shorten -d ... # xem api có resolve được không
+  ```
+- **CORS**: FE + BE cùng host (qua nginx) nên KHÔNG có CORS issue. Nếu thấy CORS error → có ai đó dùng IP khác giữa FE và API gọi.
+
+**Fix**: Xem **6.2** / **6.3** nếu api unhealthy. Xem `nginx/default.conf` location `/bookmark_service/` đã có `rewrite` chưa.
+
+---
+
+### 🟢 6.10 — Portal container `(unhealthy)` hoặc OOM kill
+
+**Triệu chứng**: `docker compose ps` thấy `bookmark-portal` `(unhealthy)` hoặc `Exited (137)` (OOM kill).
+
+**Debug**:
+```bash
+docker compose logs portal --tail=50
+docker inspect bookmark-portal --format='{{.State.OOMKilled}}'  # true nếu OOM
+docker stats bookmark-portal --no-stream
+```
+
+**Nguyên nhân thường gặp**:
+- **OOM kill** (exit 137): Memory limit 128M quá tight. Idle ~68MB nhưng spike khi SSR render. Fix: tăng `deploy.resources.limits.memory` lên 192M trong compose. Nếu VM quá tight RAM → giảm limit api (chỉ dùng 20-60MB).
+- **Healthcheck fail** (Node script không chạy được): Image alpine? Verify `node -e ...` syntax. Có thể fallback dùng `wget`:
+  ```yaml
+  test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/"]
+  ```
+- **Cold-start lâu**: SolidStart SSR có thể mất 15-20s. Tăng `start_period: 30s`.
 
 ---
 
