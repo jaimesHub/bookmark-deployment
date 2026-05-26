@@ -32,6 +32,8 @@ services:
   api:
     image: ${DOCKER_USER}/bookmark-app:${APP_VERSION:-latest}
     container_name: bookmark-api
+    # Image build amd64 only — ARM Mac chạy qua emulation (qemu)
+    platform: linux/amd64
     restart: unless-stopped
     expose:
       - "8080"
@@ -45,6 +47,12 @@ services:
       API_CONTAINER_PORT: 8080
       API_LOG_LEVEL: ${LOG_LEVEL:-info}
       API_APP_ENV: ${APP_ENV:-prod}
+      # Swagger: bật cả dev & prod theo yêu cầu. ⚠️ Production thường tắt
+      # (information disclosure) — chỉ bật khi cần API docs internal.
+      API_SWAGGER_ENABLED: ${SWAGGER_ENABLED:-true}
+      # Empty → Swagger UI dùng same-origin (nginx host). Có thể override
+      # cho prod (vd: SWAGGER_HOST=api.example.com) nếu dùng custom domain.
+      API_SWAGGER_HOST: ${SWAGGER_HOST:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -54,7 +62,14 @@ services:
       # NOTE: KHÔNG dùng `--spider` (sẽ gửi HEAD → Gin trả 404 vì chỉ đăng ký GET).
       # `-O /dev/null` để discard response body nhưng vẫn là GET request.
       test:
-        ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/health-check"]
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "-O",
+          "/dev/null",
+          "http://localhost:8080/health-check",
+        ]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -81,7 +96,11 @@ services:
       - internal
     healthcheck:
       # SolidStart SSR — bất kỳ path nào cũng trả 200 HTML (SPA catch-all)
-      test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:3000/', r => process.exit(r.statusCode===200?0:1)).on('error', () => process.exit(1))\""]
+      test:
+        [
+          "CMD-SHELL",
+          'node -e "require(''http'').get(''http://127.0.0.1:3000/'', r => process.exit(r.statusCode===200?0:1)).on(''error'', () => process.exit(1))"',
+        ]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -117,7 +136,15 @@ services:
       # Nginx proxy về api → cùng lý do KHÔNG dùng --spider (HEAD → 404).
       # Dùng 127.0.0.1 thay vì localhost: BusyBox wget trong nginx:alpine có thể
       # resolve localhost → ::1 (IPv6) trước, nhưng nginx default `listen 80` chỉ bind IPv4.
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/health-check"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1/health-check",
+        ]
       interval: 10s
       timeout: 3s
       retries: 3
