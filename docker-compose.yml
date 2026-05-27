@@ -32,8 +32,12 @@ services:
   api:
     image: ${DOCKER_USER}/bookmark-app:${APP_VERSION:-latest}
     container_name: bookmark-api
-    # Image build amd64 only — ARM Mac chạy qua emulation (qemu)
-    platform: linux/amd64
+    # Image multi-arch từ tag 45944ce (linux/amd64 + linux/arm64).
+    # Docker tự pick platform native theo host arch → bỏ pin để Mac chạy native arm64.
+    # ⚠️  MANDATORY: mọi rebuild từ giờ phải dùng `make docker-buildx-multiarch-push`
+    # (KHÔNG dùng `make docker-build` plain — sẽ ra single-arch → break deploy chéo platform).
+    # Rollback path: nếu cần pin lại amd64 (vd: rollback về image cũ amd64-only):
+    # platform: linux/amd64
     restart: unless-stopped
     expose:
       - "8080"
