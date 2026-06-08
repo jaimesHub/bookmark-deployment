@@ -97,7 +97,10 @@ services:
       RSA_PRIVATE_KEY_PATH: /app/keys/private.pem
       RSA_PUBLIC_KEY_PATH: /app/keys/public.pem
       # === bcrypt cost (PROD default 12 per Techlead ADR-4 — ~250ms hash) ===
-      BCRYPT_COST: ${BCRYPT_COST:-12}
+      # Wire-level API_BCRYPT_COST vì api.Config struct loaded via envconfig.Process("api", cfg)
+      # (cross-ref bookmark-management/internal/api/config.go:50, :56 — same pattern API_LOG_LEVEL/APP_ENV/SWAGGER_*)
+      # Host-side .env var name giữ BCRYPT_COST (consistent với LOG_LEVEL/APP_ENV pattern .env.example)
+      API_BCRYPT_COST: ${BCRYPT_COST:-12}
       # Service config: envconfig prefix "" (rỗng)
       SERVICE_NAME: ${SERVICE_NAME:-bookmark-app}
       APP_HOSTNAME: ${APP_HOSTNAME}
