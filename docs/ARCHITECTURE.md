@@ -68,6 +68,45 @@
                                 → "expose:" KHÔNG "ports:" trong docker-compose
 ```
 
+### 📌 Post-Lec-6 addition (Postgres + RSA)
+
+```
+                              Internet
+                                 │
+                                 ▼ (port 80, public)
+                              nginx
+                                 │
+                 docker network "bookmark-internal"
+                                 │
+         ┌─────────┬────────┬────┴────┬──────────┐
+         ▼         ▼        ▼         ▼          ▼
+      portal    api    redis     postgres    (nginx ↑)
+                 │        │         │
+                 │        │         ▼
+                 │        │      ┌─────────────────┐
+                 │        ▼      │ postgres-data   │
+                 │   ┌────────┐  │ (users, auth)   │
+                 │   │redis-  │  │ [NEW Lec-6]     │
+                 │   │data    │  └─────────────────┘
+                 │   │(AOF)   │
+                 │   └────────┘
+                 │
+                 ▼ (bind-mount :ro)
+         ┌────────────────────────────────┐
+         │ /opt/bookmark-deployment/keys/ │ host VM
+         │   ├── private.pem (chmod 0644) │ → /app/keys/private.pem
+         │   └── public.pem  (chmod 0644) │ → /app/keys/public.pem
+         │ [NEW Lec-6 RSA load eager-fail]│ (read-only mount)
+         └────────────────────────────────┘
+```
+
+**Lec-6 changes**:
+- ➕ Service `postgres:16-alpine` — persistence cho `users` table (AutoMigrate trong app `main` runs on startup)
+- ➕ Mount RSA keys `:ro` từ host → container `/app/keys/` (eager-load on app startup, fail-fast nếu thiếu)
+- ➕ Network: postgres reachable nội bộ qua `bookmark-internal` (KHÔNG `ports:`, chỉ `expose: 5432`)
+- ➕ Volume named: `bookmark-postgres-data` (survive `docker compose down`, mất khi `down -v` — pattern giống redis)
+- 🔄 Redis memory limit: 96M → 64M (nhường RAM cho postgres 192M, VM 1GB headroom tight)
+
 ### Service responsibility
 
 | Service | Role | Host port | Container port | Image |
@@ -76,6 +115,7 @@
 | **portal** | Frontend SSR (SolidStart) — UI shorten + login | (none) | 3000 | `ebvn/bookmark-app-portal:${PORTAL_VERSION}` |
 | **api** | Business logic, HTTP handlers | (none) | 8080 | `${DOCKER_USER}/bookmark-app:${APP_VERSION}` |
 | **redis** | Key-value store (short_code → long_url) | (none) | 6379 | `redis:7-alpine` |
+| **postgres** | User/auth data persistence (users table — Lec-6 NEW) | (none — internal only) | 5432 | `postgres:16-alpine` |
 
 ### Network isolation
 
@@ -239,6 +279,12 @@ docker compose pull && docker compose up -d
 | `LOG_LEVEL` | ❌ Optional | `info` | `debug`, `info`, `warn`, `error`. Map vào `API_LOG_LEVEL` của app |
 | `APP_ENV` | ❌ Optional | `prod` | `prod` = JSON log structured, `dev` = console pretty-print. Map vào `API_APP_ENV` |
 | `NGINX_HOST_PORT` | ❌ Optional | `80` | Port host map ra cho nginx. Đổi nếu port 80 bận (vd `8080`) |
+| `POSTGRES_USER` (Lec-6) | ✅ Yes | `bookmark` | DB user. KHÔNG dùng `postgres` (superuser) cho app conn |
+| `POSTGRES_PASSWORD` (Lec-6) | ✅ Yes | — | **Strong password ≥ 24 chars random**. Generate: `openssl rand -base64 32 \| tr -d '/+=' \| head -c 32` |
+| `POSTGRES_DB` (Lec-6) | ✅ Yes | `bookmark` | Database name — match `DB_NAME` trong api env block |
+| `BCRYPT_COST` (Lec-6) | ❌ Optional | `12` | PROD = 12 (~250ms). Đừng giảm xuống dưới 10 (security regression) |
+| `RSA_PRIVATE_KEY_PATH` (Lec-6, app env only) | ✅ Yes (PROD) | — | **PROD MUST absolute** `/app/keys/private.pem`. Defense-in-depth tránh future Dockerfile WORKDIR drift |
+| `RSA_PUBLIC_KEY_PATH` (Lec-6, app env only) | ✅ Yes (PROD) | — | Symmetric với private. PROD absolute `/app/keys/public.pem` |
 
 ### ⚠️ Vì sao `APP_VERSION` nên là SHA, không phải `latest`
 
@@ -468,6 +514,79 @@ Nếu volume đã xoá → data mất vĩnh viễn. Cần test rollback từ bac
 
 ---
 
+### 🔴 6.11 — api `(unhealthy)` với log "failed to connect to postgres" (Lec-6 NEW)
+
+**Triệu chứng**: api container `(unhealthy)` hoặc `Exited (1)`, log có dòng tương tự `failed to connect: dial tcp postgres:5432: connect: connection refused` hoặc `password authentication failed for user "bookmark"`.
+
+**Root cause**: Postgres chưa healthy, hoặc credentials trong `.env` không khớp với password lúc init Postgres volume.
+
+**Debug**:
+```bash
+docker compose logs postgres --tail=20                                    # Postgres init ok?
+docker exec bookmark-postgres pg_isready -U bookmark -d bookmark -h 127.0.0.1
+docker exec bookmark-api env | grep DB_                                    # api thấy đúng env?
+```
+
+**Fix**:
+- Nếu Postgres chưa healthy → wait 20-30s (cold start init data dir lần đầu), retry.
+- Nếu `password authentication failed`: `.env` `POSTGRES_PASSWORD` đã bị đổi sau khi volume tạo → Postgres reject login. Sửa 1 trong 2 cách:
+  ```bash
+  # A. Reset password trong DB (khuyến nghị — giữ data)
+  docker exec bookmark-postgres psql -U postgres -c "ALTER USER bookmark PASSWORD '<new>';"
+
+  # B. Recreate volume (DESTRUCTIVE — mất hết data)
+  docker compose down -v
+  docker compose up -d
+  ```
+
+---
+
+### 🔴 6.12 — api exit on startup với "load rsa keys: no such file" (Lec-6 NEW)
+
+**Triệu chứng**: api `Exited (1)` ngay sau `up`, log có `FTL ... load rsa keys error="..." private_path=/app/keys/private.pem`.
+
+**Root cause**: Keys chưa tồn tại trên host VM, hoặc mount path/permission sai.
+
+**Debug**:
+```bash
+ls -la /opt/bookmark-deployment/keys/                       # Host: files có không + chmod?
+docker exec bookmark-api ls -la /app/keys/                  # Container: mount đến nơi?
+docker exec bookmark-api id                                  # Container user: app (non-root)?
+```
+
+**Fix**: Re-run VM provisioning (T16 — xem `assignments/t16-vm-provisioning-execution.md` Bước 3 + 4):
+```bash
+cd /opt/bookmark-deployment
+sudo mkdir -p keys
+sudo openssl genpkey -algorithm RSA -out keys/private.pem -pkeyopt rsa_keygen_bits:2048
+sudo openssl rsa -pubout -in keys/private.pem -out keys/public.pem
+sudo chown root:root keys/private.pem keys/public.pem
+sudo chmod 0644 keys/private.pem keys/public.pem            # 0644 (KHÔNG 0600 — container user `app` non-root)
+docker compose up -d --force-recreate api
+```
+
+**⚠️ Trap chmod**: chmod 0600 sẽ làm container user `app` không đọc được → app exit "permission denied" → dùng **0644** cho Lec-6 single-tenant VM (defense layers: `.gitignore` block commit, bind mount `:ro`).
+
+---
+
+### 🟠 6.13 — AutoMigrate timeout trên cold start (Lec-6 NEW)
+
+**Triệu chứng**: api `(unhealthy)` sau ~15-30s, log có `gorm: connection failed during AutoMigrate` hoặc healthcheck retries exhausted.
+
+**Root cause**: Postgres init data dir lần đầu mất ~10-15s; api `start_period: 15s` có thể không đủ trên VM chậm/cold.
+
+**Fix**: 2 options:
+1. Tăng `api.healthcheck.start_period` 15s → 30s trong `docker-compose.yml`, restart stack.
+2. Start postgres riêng trước, đợi healthy, rồi mới start api:
+   ```bash
+   docker compose up -d postgres
+   sleep 25
+   docker compose ps postgres   # verify "healthy"
+   docker compose up -d api
+   ```
+
+---
+
 ## 7. Production Hardening Checklist
 
 Deployment hiện tại là **learning-grade**, chưa phải production-grade. Bảng dưới liệt kê những gì CHƯA có và roadmap nâng cấp:
@@ -488,6 +607,10 @@ Deployment hiện tại là **learning-grade**, chưa phải production-grade. B
 | 10 | **Secret management** (Vault, AWS Secrets Manager, Doppler) | ❌ Chưa có (`.env` chmod 600) | Đủ cho learning + 1 env | Khi có > 1 deployment env (staging + prod), hoặc cần rotate secrets |
 | 11 | **Multi-replica + load balancing** (nginx upstream với multiple api instances) | ❌ Chưa có (1 api replica) | Single VM = single point of failure chấp nhận được | Khi traffic vượt 1 VM capacity hoặc cần HA |
 | 12 | **Reboot test PASS end-to-end** | ⏸️ Deferred | Task #3 Step 8 defer post-Task #4 | Trước khi declare "production ready" |
+| 13 | **Postgres backup automation** (cron `pg_dump` → S3, daily, 7-day retention) | ❌ Chưa có | R-06-02 defer Lec-7 | Trước khi prod traffic (data Lec-6 = users/auth, MUST backup) |
+| 14 | **Postgres SSL/TLS** (`sslmode=verify-full`) | ❌ Chưa có | Postgres chỉ reachable nội bộ qua compose network | Khi Postgres reachable ngoài network nội bộ (multi-VM, managed DB) |
+| 15 | **RSA keys in Vault/AWS Secrets Manager** | ❌ Chưa có (host bind mount, chmod 0644) | Single-tenant VM + learning project; Vault tăng complexity | Khi multi-VM hoặc rotate frequency > 1 lần/quý, hoặc compliance audit |
+| 16 | **Connection pooling** (PgBouncer trước Postgres) | ❌ Chưa có | GORM default pool ~10 conn, đủ Lec-6/7 traffic | Khi concurrent connection > 100 hoặc thấy "too many connections" error |
 
 ### Roadmap 3 phase (nếu nâng cấp production)
 

@@ -13,3 +13,10 @@ docker-compose.override.yml
 
 # Logs nếu lỡ tạo
 *.log
+
+# ===== Lec-6: RSA keys (secret material — generate trên VM, KHÔNG commit) =====
+keys/private.pem
+keys/public.pem
+# Giữ placeholder nếu cần (vd: README trong keys/ giải thích structure)
+!keys/.gitkeep
+!keys/README.md
