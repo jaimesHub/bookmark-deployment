@@ -18,7 +18,8 @@ make health                # Verify (curl health-check qua nginx)
 
 ## 📖 Documentation
 
-- **[Architecture & Runbook](./docs/ARCHITECTURE.md)** — System diagram, prerequisites, env vars, troubleshooting, production hardening checklist
+- **[Architecture](./docs/ARCHITECTURE.md)** — System diagram, prerequisites, env vars, troubleshooting, production hardening checklist
+- **[Production Runbook](./docs/RUNBOOK.md)** — First-time VM deploy checklist, incident recovery playbook (postgres no-host, nginx 502), pre-deploy sanity check + `--no-deps` design rationale
 
 ## 🛠️ Makefile Targets
 
