@@ -160,6 +160,8 @@ curl -sS -X POST http://localhost/v1/users/register \
 # Expect: 201 + user object (KHÔNG có password_hash trong response)
 ```
 
+> ⚠️ Test data persists trong DB — lần chạy thứ 2 sẽ fail với `ErrEmailAlreadyExists`. Workaround: đổi sang dynamic email `"email":"smoke-$(date +%s)@example.com"` hoặc cleanup DB row trước (`docker compose exec postgres psql -U bookmark -d bookmark -c "DELETE FROM users WHERE email='smoke@example.com';"`).
+
 ### ✅ Acceptance criteria (first-time deploy DONE)
 
 - [ ] 5 containers UP + healthy
@@ -223,6 +225,8 @@ gh run rerun <failed-run-id> --repo jaimesHub/bookmark-management --failed
 gh run watch <failed-run-id> --repo jaimesHub/bookmark-management
 # Expect: success
 ```
+
+> ⚠️ Sau khi recover A, nếu `curl /health-check` vẫn 502 → continue sang **Symptom B** (nginx upstream DNS cache stale). User's actual 2026-06-11 incident: A recovery triggered B follow-on, cần restart nginx ngay.
 
 **Prevention**: Đảm bảo § 1 Bước 4 + 5 complete trước khi merge PR đầu tiên touch CD.
 
@@ -293,6 +297,8 @@ docker compose up -d --force-recreate api
 # 3. Monitor 5 phút
 watch -n 30 'docker stats --no-stream bookmark-api'
 ```
+
+> ⚠️ Sau khi confirm fix → commit thay đổi `docker-compose.yml` lên `bookmark-deployment` repo (`git add docker-compose.yml && git commit -m "ops(api): bump memory limit 192M → 256M"`). Nếu skip → CD next run sẽ overwrite VM state với compose từ main (config drift).
 
 **Investigation cần làm sau recovery**:
 - Heap profile (`go tool pprof http://localhost:8080/debug/pprof/heap`) nếu pprof endpoint enabled
